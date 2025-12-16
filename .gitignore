@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Django
+*.log
+settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Secrets (your Twilio keys)
+secrets.py
+config/secrets.py
+*.key
+*.pem
+*.cert
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
