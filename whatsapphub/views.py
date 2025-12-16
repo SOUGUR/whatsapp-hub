@@ -4,7 +4,6 @@ from rest_framework import status
 from whatsapphub.queue.enqueue import enqueue_bulk_messages
 
 from whatsapphub.models import WhatsAppTemplate
-from whatsapphub.serializers import WhatsAppTemplateSerializer
 from whatsapphub.services.template_service import WhatsAppTemplateService
 
 class BulkWhatsAppSendView(APIView):
