@@ -1,20 +1,20 @@
 # WhatsApp Hub – Twilio + Redis + RQ
 
-WhatsApp Hub is a Django-based backend for sending bulk WhatsApp messages using the Twilio WhatsApp API, Redis, and RQ workers.[functions.get_full_page_content:1] It is designed as a production-style pipeline with rate limiting, retries, and database-backed message tracking for auditing and analytics.[1]
+WhatsApp Hub is a Django-based backend for sending bulk WhatsApp messages using the Twilio WhatsApp API, Redis, and RQ workers. It is designed as a production-style pipeline with rate limiting, retries, and database-backed message tracking for auditing and analytics.
 
 ## Architecture
 
-The system follows this flow:[1]
+The system follows this flow:
 
 1. Client / Admin panel calls a bulk send endpoint (for example `POST /bulk-send`) with a list of phone numbers and message content.  
 2. Django API enqueues one job per recipient into a Redis-backed RQ queue.  
 3. RQ workers consume jobs, apply per-recipient rate limiting, and send messages via the Twilio WhatsApp API.  
 4. Twilio returns a message SID immediately and later sends asynchronous status webhooks (queued, sent, delivered, read, failed, undelivered).  
-5. A webhook endpoint updates the `WhatsAppMessage` table so the database is the source of truth for message history and status.[1]
+5. A webhook endpoint updates the `WhatsAppMessage` table so the database is the source of truth for message history and status.
 
 ## Core components
 
-- **Django backend** – Exposes REST endpoints for bulk send and Twilio webhooks, and defines the `WhatsAppMessage` model.[functions.get_full_page_content:1][2]
+- **Django backend** – Exposes REST endpoints for bulk send and Twilio webhooks, and defines the `WhatsAppMessage` model.
 - **Redis + RQ** – Redis acts as the message broker, and RQ provides background job processing with retry policies and separate worker processes.[2][1]
 - **Twilio WhatsApp integration** – A `WhatsAppSender` class wraps `twilio.rest.Client` to send WhatsApp messages from your Twilio WhatsApp-enabled number.[1]
 - **Rate limiter** – A `RateLimiter` class uses Redis counters (keys like `rate:{phone}`) to enforce a maximum number of messages per window per recipient or user.[3][1]
