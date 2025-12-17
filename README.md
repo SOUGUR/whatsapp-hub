@@ -1,247 +1,203 @@
-# WhatsApp Hub – Twilio + Redis + RQ
+# WhatsApp Hub
 
-WhatsApp Hub is a Django-based backend for sending bulk WhatsApp messages using the Twilio WhatsApp API, Redis, and RQ workers. It is designed as a production-style pipeline with rate limiting, retries, and database-backed message tracking for auditing and analytics.
+Django-powered backend for bulk WhatsApp messaging with Twilio, Redis, and RQ.
+
+## Overview
+
+WhatsApp Hub provides a production-style messaging pipeline where a client or admin panel triggers bulk WhatsApp sends, and the system handles queuing, delivery, and status updates asynchronously. It is built to be a reusable backend component that can plug into dashboards, CRMs, or campaign tools that need reliable WhatsApp delivery at scale.
 
 ## Architecture
 
-The system follows this flow:
+The flow starts when a client calls a bulk-send endpoint (for example `POST /bulk-send`) with a list of phone numbers and message content. The Django API enqueues one job per recipient into a Redis-backed RQ queue, workers send via Twilio's WhatsApp API, and Twilio webhooks update message status in the database so the DB becomes the source of truth.
 
-1. Client / Admin panel calls a bulk send endpoint (for example `POST /bulk-send`) with a list of phone numbers and message content.  
-2. Django API enqueues one job per recipient into a Redis-backed RQ queue.  
-3. RQ workers consume jobs, apply per-recipient rate limiting, and send messages via the Twilio WhatsApp API.  
-4. Twilio returns a message SID immediately and later sends asynchronous status webhooks (queued, sent, delivered, read, failed, undelivered).  
-5. A webhook endpoint updates the `WhatsAppMessage` table so the database is the source of truth for message history and status.
+### System Flow
 
-## Core components
+1. Client / Admin panel calls a bulk send endpoint (for example `POST /bulk-send`) with a list of phone numbers and message content.
+2. Django API enqueues one job per recipient into a Redis-backed RQ queue.
+3. RQ workers consume jobs, apply per-recipient rate limiting, and send messages via the Twilio WhatsApp API.
+4. Twilio returns a message SID immediately and later sends asynchronous status webhooks (queued, sent, delivered, read, failed, undelivered).
+5. A webhook endpoint updates the `WhatsAppMessage` table so the database is the source of truth for auditing and analytics.
 
-- **Django backend** – Exposes REST endpoints for bulk send and Twilio webhooks, and defines the `WhatsAppMessage` model.
-- **Redis + RQ** – Redis acts as the message broker, and RQ provides background job processing with retry policies and separate worker processes.[2][1]
-- **Twilio WhatsApp integration** – A `WhatsAppSender` class wraps `twilio.rest.Client` to send WhatsApp messages from your Twilio WhatsApp-enabled number.[1]
-- **Rate limiter** – A `RateLimiter` class uses Redis counters (keys like `rate:{phone}`) to enforce a maximum number of messages per window per recipient or user.[3][1]
-- **Database model** – The `WhatsAppMessage` table stores content, recipient, Twilio SID, status, error codes, metadata, and timestamps for auditing and analytics.[1]
+## Core Components
 
-## Twilio WhatsApp setup
+### Django Backend
+Exposes REST endpoints for bulk sending and Twilio webhooks and defines the `WhatsAppMessage` model for persistence. This keeps all message metadata, status, and timestamps in one place for analytics and auditing.
 
-1. Create a Twilio account and enable WhatsApp in the Twilio console (sandbox or approved business sender).  
-2. Note your `ACCOUNT_SID`, `AUTH_TOKEN`, and WhatsApp-enabled sender (for example `whatsapp:+14155238886`).  
-3. Configure a Status Callback URL in Twilio for WhatsApp messages, pointing to your deployed webhook endpoint (for example `https://your-domain.com/webhooks/twilio/status/`).[1]
+### Redis + RQ Queue
+Provide the background job pipeline, where Redis acts as the broker and RQ handles worker processes, retries, and queue separation for WhatsApp jobs.
 
-### WhatsApp sender
+### Twilio WhatsApp Integration
+Wrapped in a `WhatsAppSender` class that uses `twilio.rest.Client` to send messages from a configured WhatsApp-enabled Twilio number.
 
-```python
-from twilio.rest import Client
+### Rate Limiter
+Uses a `RateLimiter` class backed by Redis counters (keys like `rate:{phone}`) to enforce a maximum number of messages per recipient per time window.
 
-class WhatsAppSender:
-    def __init__(self, account_sid, auth_token, from_number):
-        self.client = Client(account_sid, auth_token)
-        self.from_number = from_number  # e.g. "whatsapp:+14155238886"
+### Database Model
+`WhatsAppMessage` tracks recipient, content, Twilio SID, status, error codes, metadata, and timestamps to give a complete lifecycle view for each message.
 
-    def send(self, to_number: str, message: str) -> str:
-        msg = self.client.messages.create(
-            from_=self.from_number,
-            to=f"whatsapp:{to_number}",
-            body=message,
-        )
-        return msg.sid
-```
+## Twilio WhatsApp Integration
 
-## Rate limiting
+### Configuration
+The service assumes a Twilio WhatsApp-enabled account with configured `ACCOUNT_SID`, `AUTH_TOKEN`, and sender number such as `whatsapp:+14155238886`. Twilio is configured with a Status Callback URL pointing to the deployed webhook endpoint so every status transition (`queued`, `sent`, `delivered`, `read`, `failed`, `undelivered`) is reflected in the database.
 
-The rate limiter protects your Twilio account, WhatsApp spam rules, and your own infrastructure.[1]
+### Webhook Handling
+Every Twilio status update is received at a webhook endpoint, parsed, and immediately updates the corresponding `WhatsAppMessage` record with the latest status, error codes, and timestamps.
 
-```python
-import redis
+## Bulk Sending and Worker Execution
 
-class RateLimiter:
-    def __init__(self, max_requests=50, window=3600):
-        self.redis = redis.Redis(decode_responses=True)
-        self.max_requests = max_requests
-        self.window = window
+### Bulk Enqueue
+Bulk sending is implemented by enqueuing one RQ job per recipient into a dedicated `whatsapp` queue. Each job carries the recipient phone number, message content, and metadata.
 
-    def allow(self, key: str) -> bool:
-        redis_key = f"rate:{key}"
-        count = self.redis.incr(redis_key)
-        if count == 1:
-            self.redis.expire(redis_key, self.window)
-        return count <= self.max_requests
-```
+### Worker Tasks
+Worker tasks apply rate limiting, create the initial `WhatsAppMessage` row, send via Twilio, and then update the record with the returned SID, status, and timestamps.
 
-Workers call `allow(to_number)` before sending; if it returns `False`, the job fails or is retried according to RQ’s retry configuration.[1]
+## Local Development Setup
 
-## Message model and status tracking
+### Prerequisites
+- Python 3.8+
+- Redis server
+- Django
+- Twilio account with WhatsApp enabled
 
-The database is the authoritative record of what was sent and what happened to it.[1]
+### Installation
 
-```python
-from django.db import models
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/SOUGUR/whatsapp-hub.git
+   cd whatsapp-hub
+   ```
 
-class WhatsAppMessage(models.Model):
-    sid = models.CharField(max_length=64, unique=True, null=True)
-    to_number = models.CharField(max_length=20)
-    body = models.TextField()
+2. **Create a virtual environment:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
-    status = models.CharField(max_length=20, default="queued")
-    error_code = models.CharField(max_length=50, null=True, blank=True)
-    error_message = models.TextField(null=True, blank=True)
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-    metadata = models.JSONField(default=dict, blank=True)
+4. **Set environment variables:**
+   ```bash
+   export TWILIO_ACCOUNT_SID=your_account_sid
+   export TWILIO_AUTH_TOKEN=your_auth_token
+   export TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
+   export REDIS_URL=redis://localhost:6379
+   export DJANGO_SETTINGS_MODULE=whatsapphub.settings
+   ```
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    sent_at = models.DateTimeField(null=True, blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
+5. **Run Django migrations:**
+   ```bash
+   python manage.py migrate
+   ```
 
-    def __str__(self):
-        return f"{self.to_number} - {self.status}"
-```
+6. **Start Redis:**
+   ```bash
+   redis-server
+   ```
 
-### Twilio status webhook
+7. **Start Django development server:**
+   ```bash
+   python manage.py runserver
+   ```
 
-Twilio calls your webhook to deliver status updates such as `queued`, `sent`, `delivered`, `read`, `failed`, and `undelivered`.[1]
+8. **Start RQ worker:**
+   ```bash
+   python manage.py rqworker whatsapp
+   ```
 
-```python
-from django.http import HttpResponse
-from django.views.decorators.csrf import csrf_exempt
-from .models import WhatsAppMessage
+## API Endpoints
 
-@csrf_exempt
-def twilio_status_webhook(request):
-    sid = request.POST.get("MessageSid")
-    status = request.POST.get("MessageStatus")
-    error_code = request.POST.get("ErrorCode")
-    error_message = request.POST.get("ErrorMessage")
+### POST /bulk-send
+Enqueue bulk WhatsApp messages for delivery.
 
-    try:
-        msg = WhatsAppMessage.objects.get(sid=sid)
-        msg.status = status
-        msg.error_code = error_code
-        msg.error_message = error_message
-        msg.save()
-    except WhatsAppMessage.DoesNotExist:
-        pass
-
-    return HttpResponse(status=200)
-```
-
-## Bulk enqueue and worker
-
-Bulk sending is done by enqueuing one job per recipient into an RQ queue.[2][1]
-
-```python
-# whatsapphub/queue.py
-from redis import Redis
-from rq import Queue
-from rq.retry import Retry
-from whatsapphub.tasks import send_whatsapp_message
-
-redis_conn = Redis()
-queue = Queue("whatsapp", connection=redis_conn)
-
-def enqueue_bulk_messages(phone_numbers, message):
-    job_ids = []
-
-    for number in phone_numbers:
-        job = queue.enqueue(
-            send_whatsapp_message,
-            number,
-            message,
-            retry=Retry(max=3, interval=[60, 120, 300]),
-        )
-        job_ids.append(job.id)
-
-    return job_ids
-```
-
-The worker task applies rate limiting, sends via Twilio, and updates the database.[1]
-
-```python
-# whatsapphub/tasks.py
-from django.utils import timezone
-from .sender import WhatsAppSender
-from .rate_limiter import RateLimiter
-from .models import WhatsAppMessage
-
-sender = WhatsAppSender(account_sid, auth_token, from_number)
-rate_limiter = RateLimiter()
-
-def send_whatsapp_message(to_number, message):
-    if not rate_limiter.allow(to_number):
-        raise Exception("Rate limit exceeded")
-
-    msg = WhatsAppMessage.objects.create(
-        to_number=to_number,
-        body=message,
-        status="queued",
-    )
-
-    sid = sender.send(to_number, message)
-
-    msg.sid = sid
-    msg.status = "sent"
-    msg.sent_at = timezone.now()
-    msg.save()
-
-    return sid
-```
-
-## Local development setup
-
-1. **Clone the repository**
-
-```bash
-git clone https://github.com/SOUGUR/whatsapp-hub.git
-cd whatsapp-hub
-```
-
-2. **Create and activate a virtual environment**
-
-```bash
-python3 -m venv venv
-source venv/bin/activate  # Linux/macOS
-# or
-venv\Scripts\activate     # Windows
-```
-
-3. **Install dependencies**
-
-```bash
-pip install -r requirements.txt
-```
-[functions.get_full_page_content:1]
-
-4. **Configure environment variables**
-
-Create a `.env` file or export environment variables:
-
-```bash
-export TWILIO_ACCOUNT_SID="your_sid"
-export TWILIO_AUTH_TOKEN="your_token"
-export TWILIO_WHATSAPP_FROM="whatsapp:+14155238886"
-export REDIS_URL="redis://localhost:6379/0"
-export DJANGO_SETTINGS_MODULE="whatsappcom.settings"
-```
-
-5. **Run migrations and start Django**
-
-```bash
-python manage.py migrate
-python manage.py runserver
-```
-
-6. **Start Redis and RQ workers**
-
-```bash
-# Redis
-redis-server
-
-# In another terminal
-rq worker whatsapp
-```
-
-Now you can hit your bulk-send endpoint (for example with Postman) using a payload like:[1]
-
+**Request Body:**
 ```json
 {
-  "phone_numbers": ["+919999999999", "+918888888888"],
-  "message": "Hello from WhatsApp Hub!"
+  "recipients": ["+1234567890", "+0987654321"],
+  "message": "Your message content here",
+  "metadata": {}
 }
 ```
+
+**Response:**
+```json
+{
+  "queued": 2,
+  "job_ids": ["job-id-1", "job-id-2"]
+}
+```
+
+### POST /twilio-webhook
+Twilio status callback endpoint. Automatically updates message status based on Twilio webhook data.
+
+## Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|----------|
+| `TWILIO_ACCOUNT_SID` | Twilio account ID | `ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` |
+| `TWILIO_AUTH_TOKEN` | Twilio authentication token | `authtoken` |
+| `TWILIO_WHATSAPP_FROM` | WhatsApp-enabled Twilio number | `whatsapp:+14155238886` |
+| `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
+| `DJANGO_SETTINGS_MODULE` | Django settings module | `whatsapphub.settings` |
+
+## Database Schema
+
+### WhatsAppMessage Model
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | AutoField | Primary key |
+| `recipient` | CharField | Phone number (E.164 format) |
+| `message_content` | TextField | Message text |
+| `twilio_sid` | CharField | Twilio message SID |
+| `status` | CharField | Current status (queued, sent, delivered, read, failed, undelivered) |
+| `error_code` | CharField | Twilio error code (if any) |
+| `created_at` | DateTimeField | Message creation timestamp |
+| `sent_at` | DateTimeField | Send timestamp |
+| `delivered_at` | DateTimeField | Delivery timestamp |
+| `read_at` | DateTimeField | Read timestamp |
+| `metadata` | JSONField | Custom metadata |
+
+## Production Deployment
+
+### Docker
+A `Dockerfile` is provided for containerized deployment. Build and run:
+
+```bash
+docker build -t whatsapp-hub .
+docker run -e TWILIO_ACCOUNT_SID=... -e TWILIO_AUTH_TOKEN=... whatsapp-hub
+```
+
+### Scaling Workers
+Deploy multiple RQ worker instances to handle increased message volume. Each worker connects to the same Redis queue.
+
+## Security Considerations
+
+- **Rate Limiting**: Prevents abuse by limiting messages per recipient per time window.
+- **Database Encryption**: Store sensitive Twilio tokens in environment variables, never in code.
+- **Webhook Verification**: Validate Twilio webhook signatures to ensure authenticity.
+- **Access Control**: Implement authentication and authorization on all API endpoints.
+
+## Error Handling and Retries
+
+RQ provides automatic retry mechanisms. Failed jobs are logged and can be inspected via RQ dashboard or command-line tools. Twilio failures are recorded in the database for audit trails.
+
+## Monitoring and Analytics
+
+- Track message status distribution (sent, delivered, read, failed).
+- Monitor queue depth and worker performance via RQ dashboard.
+- Export message history and delivery reports from the database.
+
+## Contributing
+
+Contributions are welcome! Please follow PEP 8 style guidelines and include tests for new features.
+
+## License
+
+MIT License
+
+## Support
+
+For issues, questions, or feature requests, please open an issue on GitHub.
